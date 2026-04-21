@@ -315,6 +315,153 @@ def count_threat_score(game: PopOutGame, player: int) -> float:
 
     return score
 
+def classify_root_moves(game: PopOutGame) -> Tuple[List[Move], List[Move], List[Move]]:
+    """
+    Split legal moves into:
+    - winning: moves that win immediately
+    - safe: moves that do not allow an immediate opponent win
+    - dangerous: moves that allow an immediate opponent win
+    """
+    winning = []
+    safe = []
+    dangerous = []
+
+    for move in game.get_legal_moves():
+        g2 = game.copy()
+        g2.make_move(move[0], move[1])
+
+        if g2.game_over and g2.winner == game.current_player:
+            winning.append(move)
+            continue
+
+        opp_wins = get_immediate_winning_moves(g2)
+        if opp_wins:
+            dangerous.append(move)
+        else:
+            safe.append(move)
+
+    return winning, safe, dangerous
+
+
+def is_late_game(game: PopOutGame, threshold: int = 20) -> bool:
+    """
+    Heuristic late-game detector.
+    Lower threshold makes tactical mode kick in earlier.
+    """
+    return game.count_pieces() >= threshold
+
+
+def tactical_eval(game: PopOutGame, root_player: int) -> float:
+    """
+    Exact terminal evaluation from root_player perspective.
+    """
+    if game.game_over:
+        if game.winner == root_player:
+            return 100000.0
+        elif game.winner is not None:
+            return -100000.0
+        return 0.0
+
+    # Non-terminal fallback: use tactical signals
+    my_wins = len(get_immediate_winning_moves_for_player_after_switch(game, root_player))
+    opp_wins = len(get_immediate_winning_moves_for_player_after_switch(game, opponent(root_player)))
+
+    my_threats = count_threat_score(game, root_player)
+    opp_threats = count_threat_score(game, opponent(root_player))
+
+    return 50.0 * (my_wins - opp_wins) + (my_threats - opp_threats)
+
+
+def tactical_search(
+    game: PopOutGame,
+    depth: int,
+    alpha: float,
+    beta: float,
+    root_player: int
+) -> float:
+    """
+    Small negamax-style tactical search for sharp late-game positions.
+    Returns score from root_player perspective.
+    """
+    if game.game_over or depth == 0:
+        return tactical_eval(game, root_player)
+
+    legal_moves = game.get_legal_moves()
+    if not legal_moves:
+        if game.can_declare_draw():
+            return 0.0
+        return tactical_eval(game, root_player)
+
+    # Immediate winning move for side to move
+    immediate = get_immediate_winning_moves(game)
+    if immediate:
+        if game.current_player == root_player:
+            return 100000.0 - (4 - depth)
+        return -100000.0 + (4 - depth)
+
+    maximizing = (game.current_player == root_player)
+
+    ordered_moves = ordered_legal_moves(game)
+
+    if maximizing:
+        value = float('-inf')
+        for move in ordered_moves:
+            g2 = game.copy()
+            g2.make_move(move[0], move[1])
+            score = tactical_search(g2, depth - 1, alpha, beta, root_player)
+            value = max(value, score)
+            alpha = max(alpha, value)
+            if beta <= alpha:
+                break
+        return value
+
+    value = float('inf')
+    for move in ordered_moves:
+        g2 = game.copy()
+        g2.make_move(move[0], move[1])
+        score = tactical_search(g2, depth - 1, alpha, beta, root_player)
+        value = min(value, score)
+        beta = min(beta, value)
+        if beta <= alpha:
+            break
+    return value
+
+
+def find_best_tactical_move(game: PopOutGame, depth: int = 4) -> Optional[Move]:
+    """
+    Search all legal moves with shallow tactical search and return the best one.
+    Used mainly in late-game positions.
+    """
+    legal_moves = game.get_legal_moves()
+    if not legal_moves:
+        return None
+
+    root_player = game.current_player
+    best_move = None
+    best_score = float('-inf')
+
+    for move in ordered_legal_moves(game):
+        g2 = game.copy()
+        g2.make_move(move[0], move[1])
+
+        # If this move wins now, take it
+        if g2.game_over and g2.winner == root_player:
+            return move
+
+        score = tactical_search(
+            g2,
+            depth=depth - 1,
+            alpha=float('-inf'),
+            beta=float('inf'),
+            root_player=root_player
+        )
+
+        if score > best_score:
+            best_score = score
+            best_move = move
+
+    return best_move
+
 
 # ---------------------------------------------------------------------
 # Tree node
@@ -421,23 +568,24 @@ class MCTS:
         """
         Run MCTS from the current state and return the selected move.
 
-        Returns
-        -------
-        If return_stats is False:
-            best_move
-
-        If return_stats is True:
-            (best_move, stats_dict)
+        Strategy:
+        1. Take immediate wins instantly.
+        2. If there is exactly one safe move, play it instantly.
+        3. In late game, run a shallow tactical search first.
+        4. Otherwise run normal MCTS.
+        5. Final move selection prefers tactical safety over raw visit count.
         """
         root = MCTSNode(game=root_game.copy())
         current_player = root.game.current_player
 
         # ------------------------------------------------------------
-        # 1) Immediate tactical win: play instantly
+        # 1) Root tactical classification
         # ------------------------------------------------------------
-        immediate_wins = get_immediate_winning_moves(root.game)
-        if immediate_wins:
-            best = random.choice(immediate_wins)
+        winning_moves, safe_moves, dangerous_moves = classify_root_moves(root.game)
+
+        # Immediate win always overrides everything
+        if winning_moves:
+            best = winning_moves[0]
 
             if return_stats:
                 value_for_p1 = 1.0 if current_player == PopOutGame.P1 else 0.0
@@ -455,22 +603,7 @@ class MCTS:
 
             return best
 
-        # ------------------------------------------------------------
-        # 2) Look for safe moves that do not allow immediate opponent win
-        # ------------------------------------------------------------
-        legal_moves = root.game.get_legal_moves()
-        safe_moves = []
-
-        for move in legal_moves:
-            g2 = root.game.copy()
-            g2.make_move(move[0], move[1])
-
-            # If opponent has no immediate winning reply, the move is safe
-            opp_wins = get_immediate_winning_moves(g2)
-            if not opp_wins:
-                safe_moves.append(move)
-
-        # If exactly one safe move exists, play it instantly
+        # If there is exactly one safe move, play it immediately
         if len(safe_moves) == 1:
             chosen = safe_moves[0]
 
@@ -488,6 +621,38 @@ class MCTS:
                 }
 
             return chosen
+
+        # ------------------------------------------------------------
+        # 2) Late-game tactical override
+        # ------------------------------------------------------------
+        if is_late_game(root.game, threshold=20):
+            tactical_move = find_best_tactical_move(root.game, depth=4)
+
+            if tactical_move is not None:
+                if return_stats:
+                    g2 = root.game.copy()
+                    g2.make_move(tactical_move[0], tactical_move[1])
+
+                    if g2.game_over and g2.winner == current_player:
+                        value_for_current_player = 1.0
+                        value_for_p1 = 1.0 if current_player == PopOutGame.P1 else 0.0
+                    else:
+                        value_for_current_player = 0.75
+                        value_for_p1 = 0.75 if current_player == PopOutGame.P1 else 0.25
+
+                    return tactical_move, {
+                        "iterations": 0,
+                        "reason": "late-game tactical search",
+                        "children": {
+                            tactical_move: {
+                                "visits": 1,
+                                "value_for_current_player": value_for_current_player,
+                                "value_for_p1": value_for_p1,
+                            }
+                        },
+                    }
+
+                return tactical_move
 
         # ------------------------------------------------------------
         # 3) Optionally restrict first-level expansion
@@ -511,15 +676,11 @@ class MCTS:
 
             node = root
 
-            # -------------------------
             # Selection
-            # -------------------------
             while (not node.is_terminal()) and node.is_fully_expanded() and node.children:
                 node = node.best_child(self.exploration_constant)
 
-            # -------------------------
             # Expansion
-            # -------------------------
             if not node.is_terminal():
                 if self.expansion_top_k is not None and node.parent is not None:
                     if len(node.untried_moves) > self.expansion_top_k:
@@ -529,14 +690,10 @@ class MCTS:
                 if expanded is not None:
                     node = expanded
 
-            # -------------------------
             # Simulation
-            # -------------------------
             value_p1 = rollout(node.game, max_depth=self.rollout_depth)
 
-            # -------------------------
             # Backpropagation
-            # -------------------------
             while node is not None:
                 node.visits += 1
                 node.total_value_p1 += value_p1
@@ -545,7 +702,7 @@ class MCTS:
             iterations += 1
 
         # ------------------------------------------------------------
-        # 5) Fallback if no children were expanded
+        # 5) Fallback if no children got expanded
         # ------------------------------------------------------------
         if not root.children:
             fallback = ordered_legal_moves(root.game)[0]
@@ -568,15 +725,38 @@ class MCTS:
             return fallback
 
         # ------------------------------------------------------------
-        # 6) Final move choice:
-        #    highest visit count, tie-break by value for current player
+        # 6) Final move selection with safety preference
         # ------------------------------------------------------------
+        # Prefer:
+        # 1. winning root children
+        # 2. safe root children
+        # 3. otherwise all children
+        candidate_children = []
+
+        if winning_moves:
+            for move in winning_moves:
+                if move in root.children:
+                    candidate_children.append(root.children[move])
+        elif safe_moves:
+            for move in safe_moves:
+                if move in root.children:
+                    candidate_children.append(root.children[move])
+
+        if not candidate_children:
+            candidate_children = list(root.children.values())
+
         best_child = max(
-            root.children.values(),
-            key=lambda child: (child.visits, child.q_for_player(current_player))
+            candidate_children,
+            key=lambda child: (
+                child.visits,
+                child.q_for_player(current_player)
+            )
         )
         best_move = best_child.move
 
+        # ------------------------------------------------------------
+        # 7) Return stats
+        # ------------------------------------------------------------
         if return_stats:
             stats = {
                 "iterations": iterations,
