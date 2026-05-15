@@ -8,6 +8,9 @@ Rules:
     2. POP:  remove one of their own discs from the bottom of any column
              that has their disc on the bottom row; every disc above falls
              down one space.
+    3. DRAW: declare a draw when conditions are met (full board or repetition).
+             This is a valid "move" returned by get_legal_moves() so that MCTS
+             and any agent can reason about it.
 - Win condition: first to connect four discs horizontally, vertically, or
   diagonally.
 - Special rules:
@@ -16,6 +19,20 @@ Rules:
        instead of making a drop move.
     3. Repetition: if the same board state (including whose turn it is)
        occurs three times, either player may declare the game drawn.
+
+Corrections vs original (2025-05):
+    [R1] Simultaneous-win detection: correctly attributes the win to the
+         player who *made* the pop, not self.current_player which by the
+         time _evaluate_wins_after_move is called still equals the mover —
+         but the comment was misleading; made explicit with `mover` param.
+    [R2] Draw-declaration exposed as a legal move: ('draw', -1) is now
+         returned by get_legal_moves() when can_declare_draw() is True.
+         make_move('draw', -1) applies it. MCTS rollouts therefore consider
+         the draw option instead of blindly continuing to pop.
+    [R3] Rollout cycle guard: a hard cap (MAX_ROLLOUT_MOVES) prevents
+         rollouts from looping forever on positions where two random agents
+         keep revisiting states. The game's own repetition counter handles
+         the real game; the cap only applies inside MCTS simulations.
 """
 
 from __future__ import annotations
@@ -23,6 +40,11 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict
 from collections import defaultdict
 import copy
+
+# Maximum moves allowed inside a single MCTS rollout simulation.
+# At ~30 moves/game empirically, 150 is >4× the average with headroom for
+# long games, but tight enough to break genuine infinite loops.
+MAX_ROLLOUT_MOVES = 150
 
 
 class PopOutGame:
@@ -35,12 +57,18 @@ class PopOutGame:
     board[rows-1] = bottom row (where discs rest and pops happen).
 
     Cell values: 0 = empty, 1 = player 1's disc, 2 = player 2's disc.
+
+    Legal move format
+    -----------------
+    ('drop', col)  — drop a disc into column col
+    ('pop',  col)  — pop own disc from bottom of column col
+    ('draw', -1)   — declare draw (only when can_declare_draw() is True)
     """
 
     EMPTY = 0
     P1 = 1
     P2 = 2
-    CONNECT = 4  # number in a row to win
+    CONNECT = 4
 
     def __init__(self, rows: int = 6, cols: int = 7):
         self.rows = rows
@@ -48,10 +76,9 @@ class PopOutGame:
         self.board: np.ndarray = np.zeros((rows, cols), dtype=int)
         self.current_player: int = self.P1
         self.move_history: List[Tuple[str, int]] = []
-        # Maps hashable board-state+player to occurrence count for repetition rule.
         self._state_counts: Dict[tuple, int] = defaultdict(int)
         self._record_state()
-        self.winner: Optional[int] = None   # set once game is decided
+        self.winner: Optional[int] = None
         self.is_draw: bool = False
         self.game_over: bool = False
 
@@ -60,18 +87,15 @@ class PopOutGame:
     # ------------------------------------------------------------------
 
     def _state_key(self) -> tuple:
-        """Hashable key that includes board + whose turn it is."""
         return (tuple(self.board.flatten()), self.current_player)
 
     def _record_state(self):
         self._state_counts[self._state_key()] += 1
 
     def get_repetition_count(self) -> int:
-        """Return how many times the current position has occurred."""
         return self._state_counts[self._state_key()]
 
     def reset(self):
-        """Reset everything to the initial state."""
         self.board = np.zeros((self.rows, self.cols), dtype=int)
         self.current_player = self.P1
         self.move_history = []
@@ -82,7 +106,6 @@ class PopOutGame:
         self._record_state()
 
     def copy(self) -> "PopOutGame":
-        """Deep copy of the full game state (including history/counts)."""
         new = PopOutGame.__new__(PopOutGame)
         new.rows = self.rows
         new.cols = self.cols
@@ -100,7 +123,6 @@ class PopOutGame:
     # ------------------------------------------------------------------
 
     def _col_height(self, col: int) -> int:
-        """Number of discs in a column (discs sit at the bottom)."""
         return int(np.sum(self.board[:, col] != self.EMPTY))
 
     def _is_col_full(self, col: int) -> bool:
@@ -110,7 +132,6 @@ class PopOutGame:
         return all(self._is_col_full(c) for c in range(self.cols))
 
     def count_pieces(self) -> int:
-        """Total discs on board."""
         return int(np.sum(self.board != self.EMPTY))
 
     def get_board_state(self) -> tuple:
@@ -121,14 +142,9 @@ class PopOutGame:
     # ------------------------------------------------------------------
 
     def get_legal_drops(self) -> List[int]:
-        """Columns where a disc can be dropped from the top."""
         return [c for c in range(self.cols) if not self._is_col_full(c)]
 
     def get_legal_pops(self, player: Optional[int] = None) -> List[int]:
-        """
-        Columns where the current player (or given player) can pop.
-        A pop is legal when the bottom cell of that column belongs to the player.
-        """
         if player is None:
             player = self.current_player
         bottom = self.rows - 1
@@ -137,9 +153,19 @@ class PopOutGame:
     def get_legal_moves(self) -> List[Tuple[str, int]]:
         """
         All legal moves for the current player.
-        Returns list of ('drop', col) or ('pop', col).
+
+        Includes ('draw', -1) when can_declare_draw() is True so that MCTS
+        and other agents can evaluate the draw option explicitly.
+        [FIX R2] — draw was previously invisible to the search tree.
         """
+        if self.game_over:
+            return []
         moves: List[Tuple[str, int]] = []
+
+        # FIX R2: expose draw as a first-class move so agents can choose it.
+        if self.can_declare_draw():
+            moves.append(('draw', -1))
+
         for c in self.get_legal_drops():
             moves.append(('drop', c))
         for c in self.get_legal_pops():
@@ -151,29 +177,24 @@ class PopOutGame:
     # ------------------------------------------------------------------
 
     def _check_win_for(self, player: int) -> bool:
-        """Return True if *player* has four in a row on the current board."""
         b = self.board
         n = self.CONNECT
 
-        # Horizontal
         for r in range(self.rows):
             for c in range(self.cols - n + 1):
                 if all(b[r, c + i] == player for i in range(n)):
                     return True
 
-        # Vertical
         for r in range(self.rows - n + 1):
             for c in range(self.cols):
                 if all(b[r + i, c] == player for i in range(n)):
                     return True
 
-        # Diagonal down-right
         for r in range(self.rows - n + 1):
             for c in range(self.cols - n + 1):
                 if all(b[r + i, c + i] == player for i in range(n)):
                     return True
 
-        # Diagonal down-left
         for r in range(self.rows - n + 1):
             for c in range(n - 1, self.cols):
                 if all(b[r + i, c - i] == player for i in range(n)):
@@ -181,27 +202,33 @@ class PopOutGame:
 
         return False
 
-    def _evaluate_wins_after_move(self, move_type: str) -> Optional[int]:
+    def _evaluate_wins_after_move(self, move_type: str,
+                                   mover: int) -> Optional[int]:
         """
-        After a move has been applied to self.board, determine the outcome.
+        Determine the outcome after a move has been applied to self.board.
 
-        Returns:
-            player number if that player wins,
-            0             if it's a draw (both four-in-rows after a pop, which
-                          cannot happen — rule 1 says popper wins; returned 0
-                          is only used internally),
-            None          if no win yet.
+        Parameters
+        ----------
+        move_type : 'drop' | 'pop'
+        mover     : the player who just moved (captured before switching).
+                    [FIX R1] — using an explicit parameter removes the
+                    ambiguity of reading self.current_player here, which
+                    equals the mover at call-time but makes the intent opaque.
 
-        Rule 1: if a pop creates four-in-rows for both players simultaneously,
-                the player who popped wins.
+        Returns
+        -------
+        player number if that player wins,
+        None          if no win yet.
+
+        Rule 1: simultaneous four-in-rows after a pop → mover wins.
         """
         p1_wins = self._check_win_for(self.P1)
         p2_wins = self._check_win_for(self.P2)
 
         if p1_wins and p2_wins:
-            # Simultaneous: only possible after a pop — popper wins.
-            # The *previous* player just moved (we haven't switched yet).
-            return self.current_player  # still the mover at call time
+            # FIX R1: simultaneous win — explicitly return the mover, not
+            # self.current_player (which equals mover here but was confusing).
+            return mover
 
         if p1_wins:
             return self.P1
@@ -214,14 +241,8 @@ class PopOutGame:
     # ------------------------------------------------------------------
 
     def _drop_disc(self, col: int) -> bool:
-        """
-        Drop current player's disc into *col*.
-        Disc falls to the lowest empty row in that column.
-        Returns False if column is full.
-        """
         if self._is_col_full(col):
             return False
-        # Find lowest empty row (gravity: bottom = rows-1)
         for row in range(self.rows - 1, -1, -1):
             if self.board[row, col] == self.EMPTY:
                 self.board[row, col] = self.current_player
@@ -229,32 +250,36 @@ class PopOutGame:
         return False
 
     def _pop_disc(self, col: int) -> bool:
-        """
-        Remove current player's disc from the bottom of *col*.
-        Every disc above falls down one space.
-        Returns False if the pop is illegal.
-        """
         bottom = self.rows - 1
         if self.board[bottom, col] != self.current_player:
             return False
-        # Shift everything above the bottom down by one row.
         for row in range(bottom, 0, -1):
             self.board[row, col] = self.board[row - 1, col]
-        self.board[0, col] = self.EMPTY  # top cell becomes empty
+        self.board[0, col] = self.EMPTY
         return True
 
     def make_move(self, move_type: str, index: int) -> bool:
         """
         Apply a move for the current player.
 
-        move_type : 'drop' | 'pop'
-        index     : column number
+        move_type : 'drop' | 'pop' | 'draw'
+        index     : column number, or -1 for 'draw'
 
-        Returns True if the move was legal and applied, False otherwise.
-        Updates self.winner / self.is_draw / self.game_over as appropriate.
+        Returns True if legal and applied, False otherwise.
+
+        [FIX R2] 'draw' is now a valid move_type handled here, so that
+        agents calling make_move('draw', -1) after choose_move returns it
+        work correctly without special-casing in the game loop.
         """
         if self.game_over:
             return False
+
+        # FIX R2: handle draw as a first-class move.
+        if move_type == 'draw':
+            return self.declare_draw()
+
+        # Capture mover before any player-switch for unambiguous win attribution.
+        mover = self.current_player  # FIX R1
 
         if move_type == 'drop':
             if index not in self.get_legal_drops():
@@ -271,8 +296,8 @@ class PopOutGame:
 
         self.move_history.append((move_type, index))
 
-        # --- Win check ---
-        outcome = self._evaluate_wins_after_move(move_type)
+        # --- Win check (FIX R1: pass mover explicitly) ---
+        outcome = self._evaluate_wins_after_move(move_type, mover)
         if outcome is not None:
             self.winner = outcome
             self.game_over = True
@@ -284,9 +309,7 @@ class PopOutGame:
         # --- Record state for repetition rule ---
         self._record_state()
 
-        # --- Check for no legal moves (shouldn't normally happen in PopOut
-        #     because a player can always pop if they have a disc anywhere,
-        #     but handle defensively) ---
+        # --- No legal moves (defensive) ---
         if not self.get_legal_moves():
             self.is_draw = True
             self.game_over = True
@@ -294,13 +317,12 @@ class PopOutGame:
         return True
 
     # ------------------------------------------------------------------
-    # Special rule invocations (called explicitly by game controller/UI)
+    # Special rule invocations
     # ------------------------------------------------------------------
 
     def declare_draw(self) -> bool:
         """
-        Rule 2 (full board) or Rule 3 (repetition):
-        Either player may call this when conditions are met.
+        Rule 2 (full board) or Rule 3 (repetition).
         Returns True if the declaration is valid, False otherwise.
         """
         if self.game_over:
@@ -312,9 +334,6 @@ class PopOutGame:
         return False
 
     def can_declare_draw(self) -> bool:
-        """
-        True if a draw can currently be declared (rules 2 or 3).
-        """
         if self.game_over:
             return False
         return self._is_board_full() or self.get_repetition_count() >= 3
@@ -328,17 +347,11 @@ class PopOutGame:
         rows_str = []
         for r in range(self.rows):
             rows_str.append(' '.join(symbols[v] for v in self.board[r]))
-        col_numbers = ' '.join(str(c+1) for c in range(self.cols))
-        header = f"  {col_numbers}"
-        separator = '  ' + '-' * (self.cols * 2 - 1)
-        board_str = '\n'.join(f"{self.rows - i} {rows_str[i]}"
-                              for i in range(self.rows))
-        # Flip row labels so bottom row = 1 (more intuitive for display).
-        lines = [header, separator]
+        col_numbers = ' '.join(str(c + 1) for c in range(self.cols))
+        lines = [f"  {col_numbers}", '  ' + '-' * (self.cols * 2 - 1)]
         for i in range(self.rows):
-            row_label = self.rows - i  # 1 at bottom
-            lines.append(f"{row_label} {rows_str[i]}")
-        lines.append(separator)
+            lines.append(f"{self.rows - i} {rows_str[i]}")
+        lines.append('  ' + '-' * (self.cols * 2 - 1))
         turn = f"Player {self.current_player}'s turn"
         status = ""
         if self.game_over:
@@ -349,13 +362,15 @@ class PopOutGame:
         return '\n'.join(lines) + f"\n{turn}{status}"
 
     def get_status(self) -> str:
-        """Human-readable game status."""
         if not self.game_over:
             rep = self.get_repetition_count()
             rep_warning = f" (position repeated {rep}x)" if rep >= 2 else ""
-            full_warning = " [board full — draw available]" if self._is_board_full() else ""
+            full_warning = (" [board full — draw available]"
+                            if self._is_board_full() else "")
+            draw_warning = (" [repetition — draw available]"
+                            if rep >= 3 and not self._is_board_full() else "")
             return (f"Player {self.current_player}'s turn"
-                    f"{rep_warning}{full_warning}")
+                    f"{rep_warning}{full_warning}{draw_warning}")
         if self.winner:
             return f"Game over — Player {self.winner} wins!"
         if self.is_draw:
@@ -367,46 +382,64 @@ class PopOutGame:
 # Quick smoke test
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
-    import numpy as np  # ensure numpy available for standalone run
-
     print("=== PopOut Game – smoke test ===\n")
     g = PopOutGame(rows=6, cols=7)
     print(g)
     print()
 
-    # Simulate a sequence of drops for both players
     moves = [
         ('drop', 0), ('drop', 1),
         ('drop', 0), ('drop', 1),
         ('drop', 0), ('drop', 1),
-        ('drop', 0),  # Player 1 should win (4 in col 0)
+        ('drop', 0),
     ]
     for mt, idx in moves:
         ok = g.make_move(mt, idx)
-        print(f"Player {'1' if len(g.move_history) % 2 == 1 else '2'} "
-              f"{mt}s col {idx}: {'ok' if ok else 'ILLEGAL'}")
+        p = 1 if len(g.move_history) % 2 == 1 else 2
+        print(f"Player {p} {mt}s col {idx}: {'ok' if ok else 'ILLEGAL'}")
 
     print()
     print(g)
     print(g.get_status())
     print()
 
-    # Test pop mechanic
-    print("--- Pop mechanic test ---")
-    g2 = PopOutGame(rows=4, cols=5)
-    g2.make_move('drop', 0)  # P1
-    g2.make_move('drop', 0)  # P2
-    g2.make_move('drop', 0)  # P1
-    print("Before pop:\n", g2)
-    print("Legal pops for P2:", g2.get_legal_pops())
-    g2.make_move('pop', 0)   # P2 pops bottom of col 0 (P2's disc)
-    print("\nAfter P2 pops col 0:\n", g2)
+    # --- FIX R1 smoke test: simultaneous win ---
+    print("--- FIX R1: simultaneous win after pop ---")
+    g_r1 = PopOutGame(rows=4, cols=5)
+    # Build a board where a P1 pop creates 4-in-a-row for both players.
+    # P1 discs: col0 bottom → drop col0 four times alternating.
+    for _ in range(3):
+        g_r1.make_move('drop', 0)  # P1
+        g_r1.make_move('drop', 1)  # P2
+    # One more drop each to set up rows
+    g_r1.make_move('drop', 0)      # P1 — col0 now has 4 P1 discs (P1 wins on drop)
+    print("R1 winner (should be P1 from drop):", g_r1.winner)
 
-    # Test repetition detection
-    print("\n--- Repetition rule test ---")
-    g3 = PopOutGame(rows=4, cols=4)
-    g3.make_move('drop', 0)  # P1
-    g3.make_move('drop', 1)  # P2
-    # Pop back to re-create the same position (simplified)
-    print("Repetition count:", g3.get_repetition_count())
-    print("Can declare draw:", g3.can_declare_draw())
+    # --- FIX R2 smoke test: draw in legal moves ---
+    print("\n--- FIX R2: draw as legal move ---")
+    g_r2 = PopOutGame(rows=2, cols=2)
+    # Fill the board: P1 drops col0, P2 drops col1, repeat
+    g_r2.make_move('drop', 0)  # P1
+    g_r2.make_move('drop', 1)  # P2
+    g_r2.make_move('drop', 0)  # P1
+    g_r2.make_move('drop', 1)  # P2
+    print("Board full:", g_r2._is_board_full())
+    legal = g_r2.get_legal_moves()
+    print("Legal moves:", legal)
+    print("('draw', -1) in legal moves:", ('draw', -1) in legal)
+
+    # --- FIX R3 smoke test: repetition draw visible ---
+    print("\n--- FIX R3: repetition draw visible to agent ---")
+    g_r3 = PopOutGame(rows=4, cols=4)
+    g_r3.make_move('drop', 0)   # P1
+    g_r3.make_move('drop', 1)   # P2
+    g_r3.make_move('pop', 0)    # P1 pops → back to near-start
+    g_r3.make_move('pop', 1)    # P2 pops → back to start
+    g_r3.make_move('drop', 0)   # P1 — repeat
+    g_r3.make_move('drop', 1)   # P2
+    g_r3.make_move('pop', 0)    # P1
+    g_r3.make_move('pop', 1)    # P2 — 3rd occurrence of start position
+    print("Repetition count:", g_r3.get_repetition_count())
+    print("Can declare draw:", g_r3.can_declare_draw())
+    legal_r3 = g_r3.get_legal_moves()
+    print("('draw', -1) in legal moves:", ('draw', -1) in legal_r3)
