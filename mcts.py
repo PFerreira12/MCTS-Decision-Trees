@@ -83,18 +83,6 @@ class MCTSNode:
 
         return exploitation + exploration
  
-    def rave_score(self, move: Tuple[str, int], c: float = math.sqrt(2),
-                   k: float = 1000) -> float:
-        """Combined UCT + RAVE score for a *child* node reached via *move*."""
-        n = self.visits
-        n_rave = self.rave_visits[move]
-        beta = n_rave / (n + n_rave + 4 * k * n * n_rave) if (n + n_rave) > 0 else 1.0
-        uct = (self.wins / self.visits) if self.visits else 0.0
-        rave = (self.rave_wins[move] / n_rave) if n_rave else 0.0
-        parent_visits = self.parent.visits if self.parent else self.visits
-        explore = c * math.sqrt(math.log(max(parent_visits, 1)) / max(self.visits, 1))
-        return (1 - beta) * uct + beta * rave + explore
- 
     def is_fully_expanded(self) -> bool:
         return len(self.untried) == 0
  
