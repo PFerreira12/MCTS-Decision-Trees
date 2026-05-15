@@ -1,13 +1,14 @@
 import sys
+from pathlib import Path
 import pygame
 import math
 from logic import PopOutGame
 from mcts import MCTSPlayer
 
-# Try to import the future ID3 agent
+# Try to import the scratch ID3 agent
 try:
-    from id3_player import ID3Player
-    ID3_AVAILABLE = True
+    from id3_player import DEFAULT_MODEL_PATH, ID3Player
+    ID3_AVAILABLE = Path(DEFAULT_MODEL_PATH).exists()
 except ImportError:
     ID3_AVAILABLE = False
 
@@ -200,12 +201,41 @@ def draw_board_and_pieces(game, anim_mgr):
         cx = bx + p["col"] * CELL_SIZE + CELL_SIZE // 2
         draw_piece(cx, int(p["curr_y"]), p["color"])
 
+def build_agents(mode):
+    if mode == "hvh":
+        return {1: "H", 2: "H"}
+    if mode == "hvai":
+        return {
+            1: "H",
+            2: MCTSPlayer(name="MCTS", player_num=2, strategy="topk", time_limit=1.0),
+        }
+    if mode == "aivai":
+        return {
+            1: MCTSPlayer(name="MCTS", player_num=1, strategy="topk", time_limit=1.0),
+            2: ID3Player(name="ID3"),
+        }
+    raise ValueError(f"Unknown mode: {mode}")
+
+def animate_or_apply_move(game, anim_mgr, move):
+    m_type, col = move
+    if m_type == "draw":
+        game.make_move(m_type, col)
+        return "DRAW"
+
+    callback = lambda t=m_type, c=col: game.make_move(t, c)
+    if m_type == "drop":
+        row = next(r for r in range(ROWS-1, -1, -1) if game.board[r, col] == 0)
+        anim_mgr.trigger_drop(col, row, game.current_player, callback)
+    else:
+        anim_mgr.trigger_pop(col, game.board[:, col].copy(), callback)
+    return f"{m_type.upper()} Col {col+1}"
+
 # --------------------------------------------------
 # Main Loop
 # --------------------------------------------------
 def main():
     state, anim_mgr = "menu", AnimationManager()
-    game, agents, last_move, last_reason = None, None, "—", "—"
+    game, agents, last_move, last_reason = None, None, "-", "-"
     
     buttons = [
         MenuButton(WIDTH//2-210, 260, 420, 72, "Human vs Human", "hvh", "H", "H"),
@@ -244,24 +274,22 @@ def main():
                 agent = agents[game.current_player]
                 if not isinstance(agent, str):
                     pygame.time.wait(AI_THINK_DELAY_MS)
-                    res = agent.engine.search(game, return_stats=True) if isinstance(agent, MCTSPlayer) else (agent.get_move(game), {"reason":"ID3"})
+                    res = (
+                        agent.engine.search(game, return_stats=True)
+                        if isinstance(agent, MCTSPlayer)
+                        else (agent.get_move(game), {"reason": agent.name})
+                    )
                     move, stats = res
                     if move:
-                        m_type, col = move
-                        callback = lambda t=m_type, c=col: game.make_move(t, c)
-                        if m_type == "drop":
-                            row = next(r for r in range(ROWS-1, -1, -1) if game.board[r, col] == 0)
-                            anim_mgr.trigger_drop(col, row, game.current_player, callback)
-                        else:
-                            anim_mgr.trigger_pop(col, game.board[:, col].copy(), callback)
-                        last_move, last_reason = f"{m_type.upper()} Col {col+1}", stats.get("reason", "AI")
+                        last_move = animate_or_apply_move(game, anim_mgr, move)
+                        last_reason = stats.get("reason", "AI")
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT: pygame.quit(); sys.exit()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_m: state = "menu"
                 if event.key == pygame.K_r and state == "game":
-                    game = PopOutGame(ROWS, COLS); last_move, last_reason = "—", "Reset"
+                    game = PopOutGame(ROWS, COLS); last_move, last_reason = "-", "Reset"
                 if event.key == pygame.K_ESCAPE: pygame.quit(); sys.exit()
 
             if event.type == pygame.MOUSEBUTTONDOWN and not anim_mgr.is_animating():
@@ -269,9 +297,8 @@ def main():
                     for b in buttons:
                         if b.rect.collidepoint(event.pos) and b.enabled:
                             game = PopOutGame(ROWS, COLS)
-                            p1 = "H" if b.p1_type == "H" else MCTSPlayer(name="MCTS", player_num=1, time_limit=1.0)
-                            p2 = "H" if b.p2_type == "H" else MCTSPlayer(name="MCTS", player_num=2, time_limit=1.0)
-                            agents, state, last_move, last_reason = {1: p1, 2: p2}, "game", "—", "Start"
+                            agents = build_agents(b.action)
+                            state, last_move, last_reason = "game", "-", "Start"
                 elif state == "game" and not game.game_over and isinstance(agents[game.current_player], str):
                     bx, by = board_origin()
                     if bx <= event.pos[0] <= bx + BOARD_WIDTH:

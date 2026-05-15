@@ -1,0 +1,7 @@
+if petallength < 2.45:  [gain=0.918296]
+  Predict Iris-setosa  [n=40; Iris-setosa:40]
+if petallength >= 2.45:  [gain=0.918296]
+  if petalwidth < 1.75:  [gain=0.721710]
+    Predict Iris-versicolor  [n=42; Iris-versicolor:39, Iris-virginica:3]
+  if petalwidth >= 1.75:  [gain=0.721710]
+    Predict Iris-virginica  [n=38; Iris-versicolor:1, Iris-virginica:37]
