@@ -90,6 +90,11 @@ class AnimationManager:
                     "vel": 5,
                 })
 
+        if not self.active_pieces:
+            callback = self.on_complete_callback
+            self.on_complete_callback = None
+            callback()
+
     def update(self):
         if not self.active_pieces:
             return
