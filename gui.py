@@ -73,7 +73,6 @@ class AnimationManager:
     def trigger_pop(self, col, old_column_data, callback):
         bx, by = board_origin()
         self.on_complete_callback = callback
-        pieces_before = len(self.active_pieces)
         for r in range(len(old_column_data)-1):
             val = old_column_data[r]
             if val != 0:
@@ -82,11 +81,6 @@ class AnimationManager:
                     "target_y": by + (r + 1) * CELL_SIZE + CELL_SIZE // 2,
                     "col": col, "color": P1_COLORS if val == 1 else P2_COLORS, "vel": 5
                 })
-        # If the popped disc was alone in the column, no pieces fall.
-        # Apply the move immediately so the AI turn can advance.
-        if len(self.active_pieces) == pieces_before:
-            self.on_complete_callback = None
-            callback()
 
     def update(self):
         if not self.active_pieces: return
@@ -185,41 +179,63 @@ def draw_piece(cx, cy, color_dict):
 def draw_board_and_pieces(game, anim_mgr):
     bx, by = board_origin()
     draw_panel(pygame.Rect(bx-15, by-15, BOARD_WIDTH+30, BOARD_HEIGHT+30), BOARD_COLOR, BOARD_BORDER, radius=20, width=4)
-    
-    # Static board slots
+
+    anim_cols = {p["col"] for p in anim_mgr.active_pieces}
+
     for r in range(ROWS):
         for c in range(COLS):
             cx, cy = bx + c*CELL_SIZE + CELL_SIZE//2, by + r*CELL_SIZE + CELL_SIZE//2
-            pygame.draw.circle(screen, (15, 25, 45), (cx, cy), 30)
-            pygame.draw.circle(screen, (45, 65, 110), (cx, cy), 30, 2)
-            
-            # Anti-flicker: Only draw static piece if that column isn't animating
-            anim_cols = [p["col"] for p in anim_mgr.active_pieces]
             val = game.board[r, c]
+
             if val != 0 and c not in anim_cols:
+                # Occupied static slot: draw piece, then just the ring
                 draw_piece(cx, cy, P1_COLORS if val == 1 else P2_COLORS)
-            
-            if r == 0: draw_text(str(c+1), cx-5, by-40, coord_f)
+                pygame.draw.circle(screen, (45, 65, 110), (cx, cy), 30, 3)
+            else:
+                # Empty slot: dark fill + ring
+                pygame.draw.circle(screen, (15, 25, 45), (cx, cy), 30)
+                pygame.draw.circle(screen, (45, 65, 110), (cx, cy), 30, 3)
+
+            if r == 0:
+                draw_text(str(c+1), cx-5, by-40, coord_f)
         draw_text(str(ROWS-r), bx-40, by + r*CELL_SIZE + 32, coord_f)
 
-    # Animated pieces on top
+    # Animated pieces drawn last, on top of everything
     for p in anim_mgr.active_pieces:
         cx = bx + p["col"] * CELL_SIZE + CELL_SIZE // 2
         draw_piece(cx, int(p["curr_y"]), p["color"])
 
+def make_mcts_player(name, player_num):
+    return MCTSPlayer(
+        name=name,
+        player_num=player_num,
+        time_limit=2.0,
+        exploration_constant=1.2,
+        rollout_depth=100,
+        expansion_top_k=8,
+        verbose=False,
+    )
+
+
 def build_agents(mode):
     if mode == "hvh":
-        return {1: "H", 2: "H"}
+        return {
+            1: "H",
+            2: "H",
+        }
+
     if mode == "hvai":
         return {
             1: "H",
-            2: MCTSPlayer(name="MCTS", player_num=2, strategy="topk", time_limit=2.0),
+            2: make_mcts_player("MCTS", 2),
         }
+
     if mode == "aivai":
         return {
-            1: MCTSPlayer(name="MCTS", player_num=1, strategy="topk", time_limit=2.0),
-            2: ID3Player(name="ID3"),
+            1: make_mcts_player("MCTS", 1),
+            2: ID3Player(name="ID3", player_num=2),
         }
+
     raise ValueError(f"Unknown mode: {mode}")
 
 def animate_or_apply_move(game, anim_mgr, move):
