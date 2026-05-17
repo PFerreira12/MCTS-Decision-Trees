@@ -2,12 +2,23 @@ import sys
 import math
 import pickle
 import copy
+import io
 from pathlib import Path
 
 import pygame
 
 from logic import PopOutGame
 from mcts import MCTSPlayer
+import mcts as _mcts_module
+
+
+class _MCTSUnpickler(pickle.Unpickler):
+    """Redirect classes pickled under __main__ to the mcts module."""
+    def find_class(self, module, name):
+        if module == "__main__":
+            if hasattr(_mcts_module, name):
+                return getattr(_mcts_module, name)
+        return super().find_class(module, name)
 
 try:
     from id3_player import DEFAULT_MODEL_PATH, ID3Player
@@ -186,11 +197,8 @@ def fallback_mcts_player(name, player_num):
     return MCTSPlayer(
         name=name,
         player_num=player_num,
+        strategy="topk",
         time_limit=2.0,
-        exploration_constant=1.2,
-        rollout_depth=100,
-        expansion_top_k=8,
-        verbose=False,
     )
 
 
@@ -201,7 +209,7 @@ def load_best_mcts_agent(name="Best MCTS", player_num=1):
 
     try:
         with open(BEST_MCTS_PATH, "rb") as file:
-            agent = pickle.load(file)
+            agent = _MCTSUnpickler(file).load()
 
         try:
             agent.name = name
