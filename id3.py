@@ -1,16 +1,3 @@
-"""
-ID3 decision tree implementation built from scratch.
-
-This module intentionally does not use sklearn or any automatic tree learner.
-It supports:
-- entropy
-- information gain
-- categorical multi-way splits
-- numeric threshold splits
-- prediction and class probabilities
-- a small text export for reports/notebooks
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
