@@ -49,8 +49,11 @@ class ID3Player:
             self.model = pickle.load(fh)
 
     def get_move(self, game: PopOutGame) -> Optional[Tuple[str, int]]:
-        legal_moves = [move for move in game.get_legal_moves() if move[0] in {"drop", "pop"}]
+        all_legal_moves = game.get_legal_moves()
+        legal_moves = [move for move in all_legal_moves if move[0] in {"drop", "pop"}]
         if not legal_moves:
+            if ("draw", -1) in all_legal_moves:
+                return "draw", -1
             return None
 
         features = state_to_features(game).reshape(1, -1)

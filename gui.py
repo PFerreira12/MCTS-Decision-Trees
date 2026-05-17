@@ -73,6 +73,7 @@ class AnimationManager:
     def trigger_pop(self, col, old_column_data, callback):
         bx, by = board_origin()
         self.on_complete_callback = callback
+        pieces_before = len(self.active_pieces)
         for r in range(len(old_column_data)-1):
             val = old_column_data[r]
             if val != 0:
@@ -81,6 +82,11 @@ class AnimationManager:
                     "target_y": by + (r + 1) * CELL_SIZE + CELL_SIZE // 2,
                     "col": col, "color": P1_COLORS if val == 1 else P2_COLORS, "vel": 5
                 })
+        # If the popped disc was alone in the column, no pieces fall.
+        # Apply the move immediately so the AI turn can advance.
+        if len(self.active_pieces) == pieces_before:
+            self.on_complete_callback = None
+            callback()
 
     def update(self):
         if not self.active_pieces: return
