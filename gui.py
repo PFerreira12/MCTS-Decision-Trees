@@ -207,11 +207,11 @@ def build_agents(mode):
     if mode == "hvai":
         return {
             1: "H",
-            2: MCTSPlayer(name="MCTS", player_num=2, strategy="topk", time_limit=1.0),
+            2: MCTSPlayer(name="MCTS", player_num=2, strategy="topk", time_limit=2.0),
         }
     if mode == "aivai":
         return {
-            1: MCTSPlayer(name="MCTS", player_num=1, strategy="topk", time_limit=1.0),
+            1: MCTSPlayer(name="MCTS", player_num=1, strategy="topk", time_limit=2.0),
             2: ID3Player(name="ID3"),
         }
     raise ValueError(f"Unknown mode: {mode}")

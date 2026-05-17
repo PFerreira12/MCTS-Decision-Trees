@@ -147,7 +147,7 @@ class MCTS:
         while True:
             if self.iterations is not None and n >= self.iterations:
                 break
-            if self.iterations is None and time.time() - start > self.time_limit:
+            if time.time() - start > self.time_limit:  # hard cap por jogada
                 break
 
             node = self._select(self.root)
@@ -513,7 +513,7 @@ class MCTSPlayer:
         name: str = "MCTS",
         player_num: int = 1,
         strategy: str = "topk",
-        time_limit: float = 1.0,
+        time_limit: float = 2.5,
         iterations: Optional[int] = None,
         **kwargs,
     ):
