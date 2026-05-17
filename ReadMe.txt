@@ -18,6 +18,7 @@ jupyter notebook PopOut_MCTS_DecisionTrees.ipynb
 
 # 7. Abrir a interface grafica
 python gui.py
+7.1 MCTS vs ID3 - aqui
 
 # Nota
 # Se "python gui.py" disser que nao encontra pygame, usa o Python do Anaconda:
